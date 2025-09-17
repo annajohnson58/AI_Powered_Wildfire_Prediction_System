@@ -1,44 +1,37 @@
-import ee
-ee.Initialize(project='foresightai-469610')
+import pandas as pd
+import geopandas as gpd
+from shapely.geometry import Point
 
-# Define Thrissur region (10 km buffer)
-region = ee.Geometry.Point([76.214, 10.527]).buffer(10000)
-
-# Define time range
-start_date = '2024-01-01'
-end_date = '2024-12-31'
-
-# Load FIRMS fire point data
-fire_points = (
-    ee.FeatureCollection("NASA/LANCE/SNPP_VIIRS/C2")
+# 🔥 Load MODIS fire data
+fires = pd.read_csv("data/firms/fire_archive_J1V-C2_661536.csv")
+fires['geometry'] = [Point(xy) for xy in zip(fires.longitude, fires.latitude)]
+fires_gdf = gpd.GeoDataFrame(fires, geometry='geometry', crs="EPSG:4326")
 
 
-    .filterDate(start_date, end_date)
-    .filterBounds(region)
+
+kerala = gpd.read_file("data/shapefiles/kerala_districts.shp").to_crs("EPSG:4326")
+
+fires_kerala = gpd.sjoin(fires_gdf, kerala, predicate='intersects')
+
+hotspot_counts = fires_kerala.groupby('DISTRICT').size().reset_index(name='thermal_count')
+hotspot_counts['DISTRICT'] = hotspot_counts['DISTRICT'].str.strip().str.lower()
+hotspot_counts['thermal_flag'] = (hotspot_counts['thermal_count'] > 0).astype(int)
+fused = pd.read_csv("data/fused/fused_ndvi_weather.csv")
+
+fused['district'] = fused['district'].str.strip().str.lower()
+
+fused = pd.merge(
+    fused,
+    hotspot_counts,
+    left_on='district',
+    right_on='DISTRICT',
+    how='left'
 )
 
-# Count fire points per day
-def count_fires(date):
-    day_start = ee.Date(date)
-    day_end = day_start.advance(1, 'day')
-    daily = fire_points.filterDate(day_start, day_end)
-    return ee.Feature(None, {
-        'date': day_start.format('YYYY-MM-dd'),
-        'fire_count': daily.size()
-    })
+fused['thermal_flag'] = fused['thermal_flag'].fillna(0).astype(int)
+fused['thermal_count'] = fused['thermal_count'].fillna(0).astype(int)
+fused['dryness_index'] = (1 - fused['ndvi']) * (1 - fused['rh'] / 100)
 
-# Generate list of dates
-dates = ee.List.sequence(0, 364).map(lambda d: ee.Date(start_date).advance(d, 'day'))
-daily_counts = ee.FeatureCollection(dates.map(count_fires))
-
-# Export to Drive
-task = ee.batch.Export.table.toDrive(
-    collection=daily_counts,
-    description='FIRMS_FireCounts_Thrissur_2024',
-    folder='EarthEngineExports',
-    fileNamePrefix='firms_firecounts_thrissur_2024',
-    fileFormat='CSV'
-)
-task.start()
-
-print("✅ FIRMS fire point count export started. Check your Drive > EarthEngineExports folder.")
+print(fused.head())
+print(fused.columns)
+fused.to_csv("data/fused/fused_ndvi_weather_thermal.csv", index=False)

@@ -1,54 +1,38 @@
-import ee
-ee.Initialize(project='foresightai-469610')
+import cdsapi
+import datetime
+import os
 
-# Thrissur region (50 km buffer to match ERA5 grid)
-region = ee.Geometry.Point([76.214, 10.527]).buffer(50000)
+# 📅 Use latest available ERA5 date (typically 4–5 days behind)
+latest_available_date = datetime.date.today() - datetime.timedelta(days=5)
+date_str = latest_available_date.strftime('%Y-%m-%d')
+print(f"📅 Requesting ERA5 weather for {date_str}")
 
-# Time range
-start_date = '2024-01-01'
-end_date = '2024-12-31'
+# 📁 Output directory
+output_dir = "data/weather"
+os.makedirs(output_dir, exist_ok=True)
 
-# Load ERA5-Land monthly aggregated dataset
-era5 = (
-    ee.ImageCollection("ECMWF/ERA5_LAND/MONTHLY_AGGR")
-    .filterDate(start_date, end_date)
-    .filterBounds(region)
+# 🌍 CDS API client
+c = cdsapi.Client()
+
+# 📦 ERA5-Land data request
+c.retrieve(
+    'reanalysis-era5-land',
+    {
+        'variable': [
+            '2m_temperature',
+            '2m_dewpoint_temperature',
+            'total_precipitation',
+            '10m_u_component_of_wind',
+            '10m_v_component_of_wind'
+        ],
+        'year': str(latest_available_date.year),
+        'month': str(latest_available_date.month).zfill(2),
+        'day': str(latest_available_date.day).zfill(2),
+        'time': [f"{hour:02d}:00" for hour in range(0, 24)],
+        'format': 'netcdf',
+        'area': [12.5, 74.5, 8.0, 78.5],  # Kerala bounding box: N, W, S, E
+    },
+    f"{output_dir}/era5_{date_str}.nc"
 )
 
-# Extract monthly features
-def extract_monthly(image):
-    stats = image.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=region,
-        scale=10000,
-        maxPixels=1e13
-    )
-
-    def safe(key):
-        return ee.Algorithms.If(stats.get(key), stats.get(key), -9999)
-
-    return ee.Feature(None, {
-    'date': image.date().format('YYYY-MM'),
-    'temp_2m': safe('temperature_2m'),
-    'precip_m': safe('total_precipitation_sum'),
-    'u_wind_10m': safe('u_component_of_wind_10m'),
-    'v_wind_10m': safe('v_component_of_wind_10m'),
-    df['temp_C'] = df['temp_2m'] - 273.15
-
-})
-
-
-# Map and export
-features = era5.map(extract_monthly)
-fc = ee.FeatureCollection(features)
-
-task = ee.batch.Export.table.toDrive(
-    collection=fc,
-    description='ERA5Land_Monthly_Thrissur_2024',
-    folder='EarthEngineExports',
-    fileNamePrefix='era5land_monthly_thrissur_2024',
-    fileFormat='CSV'
-)
-task.start()
-
-print("✅ ERA5-Land monthly weather export started. Check your Drive > EarthEngineExports folder.")
+print(f"✅ ERA5 weather data saved to {output_dir}/era5_{date_str}.nc")
